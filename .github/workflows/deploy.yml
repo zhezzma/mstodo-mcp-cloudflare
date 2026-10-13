@@ -1,0 +1,52 @@
+# 自动部署：push 到 main（含上游同步）或手动触发时，部署到 Cloudflare Workers。
+#
+# 前置 GitHub Actions secrets（仓库 Settings → Secrets and variables → Actions）：
+#   - CLOUDFLARE_ACCOUNT_ID  Cloudflare 账户 ID
+#   - CLOUDFLARE_API_TOKEN   Cloudflare Workers 部署令牌（需 Workers Scripts: Edit）
+#   - WRANGLER_JSONC         完整的 wrangler.jsonc 内容（含 account_id / KV id / 域名路由；
+#                            不含密钥——Worker 运行时 secrets 已托管在 Cloudflare 侧）
+#
+# Worker 的应用密钥（MS_CLIENT_ID 等）不在 CI 管理：它们经 `wrangler secret put`
+# 托管在 Cloudflare，跨版本持久存在，仅当需要轮换时手动重推。
+
+name: Deploy to Cloudflare Workers
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-main
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Restore wrangler config
+        env:
+          WRANGLER_JSONC: ${{ secrets.WRANGLER_JSONC }}
+        run: |
+          if [ -z "$WRANGLER_JSONC" ]; then
+            echo "::error::secret WRANGLER_JSONC 未配置"; exit 1
+          fi
+          printf '%s' "$WRANGLER_JSONC" > wrangler.jsonc
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Deploy
+        run: npx wrangler deploy
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
