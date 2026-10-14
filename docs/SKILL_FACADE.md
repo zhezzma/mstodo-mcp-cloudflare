@@ -53,6 +53,21 @@ on the MCP route — no Microsoft OAuth is exposed to facade callers. The OAuth
 provider layer (`/authorize`, `/token`, `/register`, `/mcp`) is untouched; the
 facade routes live before `oauthProvider.fetch` in `src/index.ts`.
 
+## Standalone re-auth & status page (browser)
+
+- `GET /` — status page: Microsoft connection state (masked identity), token
+  expiry, and the re-auth link. Full identity only with a valid bearer key.
+- `GET /api/login` — 302 to Microsoft consent (PKCE, single-use state).
+  Unauthenticated by design; the `OWNER_EMAIL` gate rejects non-owners before
+  any state is stored.
+- `GET /api/login/callback` — exchange, owner gate, store tokens + identity.
+  **Requires a one-time redirect URI in the Azure app registration:**
+  `<origin>/api/login/callback` (Platform: Web).
+
+Recovery path when the refresh token dies (password change, revoked consent):
+open `/` → click re-auth → done. Identity changes wipe all per-identity cached
+state, same as the upstream `/authorize` flow.
+
 ## Configuration
 
 ```bash

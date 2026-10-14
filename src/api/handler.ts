@@ -33,6 +33,7 @@
 // callers read `.ok`.
 
 import { log } from "../log";
+import { handleLoginCallback, handleLoginStart, handleStatusPage } from "./login";
 
 // Interface merging: SKILL_API_KEY joins Env without touching src/types.ts.
 declare global {
@@ -206,6 +207,13 @@ export default {
   // paths we own, null so the caller's routing (OAuth provider) continues.
   async fetch(req: Request, env: Env): Promise<Response | null> {
     const url = new URL(req.url);
+
+    // Status page + standalone re-auth (unauthenticated by design; the
+    // OWNER_EMAIL gate inside the login flow is the protection).
+    if (url.pathname === "/") return handleStatusPage(req, env);
+    if (url.pathname === "/api/login") return handleLoginStart(req, env);
+    if (url.pathname === "/api/login/callback") return handleLoginCallback(req, env);
+
     const isTools = url.pathname === "/api/tools";
     const toolPrefix = "/api/tool/";
     const isToolCall = url.pathname.startsWith(toolPrefix);
