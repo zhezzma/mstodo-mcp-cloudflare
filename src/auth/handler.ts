@@ -19,6 +19,7 @@ import {
   TokenExchangeError,
   type AuthStateRow,
 } from "./microsoft";
+import { FACADE_LOGIN_SENTINEL, completeFacadeLogin } from "../api/login";
 
 const AUTHORIZE_PATH = "/authorize";
 const CALLBACK_PATH = "/auth/microsoft/callback";
@@ -113,6 +114,15 @@ async function handleCallback(req: Request, env: Env, url: URL): Promise<Respons
   if (!state) {
     log.warn("oauth_state_expired_or_missing", { stateTokenPrefix: stateToken.slice(0, 8) });
     return html("<h1>State expired or unknown</h1><p>Restart the authorization flow.</p>", 400);
+  }
+
+  // FACADE BRANCH (upstream-sync note): /api/login reuses THIS redirect URI so
+  // MSA (personal-account) apps only ever need the one registered callback.
+  // Its state rows carry a sentinel instead of MCP oauthReqInfo; hand them to
+  // the facade for completion (exchange → owner gate → store, then a static
+  // success page — no completeAuthorization, no MCP client involved).
+  if (atob(state.oauth_req_info_b64) === FACADE_LOGIN_SENTINEL) {
+    return completeFacadeLogin(env, { code, codeVerifier: state.code_verifier });
   }
 
   let token;

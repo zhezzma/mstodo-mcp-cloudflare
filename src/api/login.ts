@@ -45,12 +45,16 @@ import {
 } from "../auth/microsoft";
 import { tokensMatch } from "./handler";
 
-const LOGIN_CALLBACK_PATH = "/api/login/callback";
+// Reuse the ONE Microsoft redirect URI that is already registered and proven
+// to exchange tokens for this (MSA) app: upstream's MCP callback path. The
+// state row disambiguates the two flows (sentinel vs MCP oauthReqInfo) and
+// src/auth/handler.ts branches on it — no second Azure redirect URI needed.
+const LOGIN_CALLBACK_PATH = "/auth/microsoft/callback";
 
-// Sentinel stored in AuthStateRow.oauth_req_info_b64 — upstream's callback
-// expects base64(MCP-oauthReqInfo) there; the facade callback owns its own
-// rows and never feeds this to completeAuthorization.
-const FACADE_LOGIN_SENTINEL = "facade-login";
+// Sentinel stored in AuthStateRow.oauth_req_info_b64. auth/handler.ts
+// branches on it: rows carrying this value complete via completeFacadeLogin
+// (store tokens, static success page) instead of completeAuthorization.
+export const FACADE_LOGIN_SENTINEL = "facade-login";
 
 function html(body: string, status = 200): Response {
   return new Response(body, {
@@ -162,6 +166,15 @@ export async function handleStatusPage(req: Request, env: Env): Promise<Response
   );
 }
 
+// The ONE redirect URI both flows share: must match the Azure registration
+// exactly. Pinned to SERVICE_BASE_URL (not req.url origin) so authorize and
+// token-exchange always send the identical string, even if the worker is ever
+// reached via a different origin.
+export function facadeCallbackUri(env: Env): string {
+  const base = String(env.SERVICE_BASE_URL ?? "https://mstodo.godgodgame.com").replace(/\/$/, "");
+  return `${base}${LOGIN_CALLBACK_PATH}`;
+}
+
 /** GET /api/login — begin a standalone Microsoft authorization round. */
 export async function handleLoginStart(req: Request, env: Env): Promise<Response> {
   if (req.method !== "GET") return html("method not allowed", 405);
@@ -177,7 +190,7 @@ export async function handleLoginStart(req: Request, env: Env): Promise<Response
   await putAuthState(env, stateToken, row);
 
   const authorizeUrl = buildAuthorizeUrl(env, {
-    redirectUri: new URL(req.url).origin + LOGIN_CALLBACK_PATH,
+    redirectUri: facadeCallbackUri(env),
     state: stateToken,
     codeChallenge,
   });
@@ -185,46 +198,45 @@ export async function handleLoginStart(req: Request, env: Env): Promise<Response
   return Response.redirect(authorizeUrl, 302);
 }
 
-/** GET /api/login/callback — finish the round: exchange, owner gate, store. */
-export async function handleLoginCallback(req: Request, env: Env): Promise<Response> {
-  const url = new URL(req.url);
-  const code = url.searchParams.get("code");
-  const stateToken = url.searchParams.get("state");
-  const oauthError = url.searchParams.get("error");
+// Shared by BOTH entry points: auth/handler.ts delegates sentinel state rows
+// here after takeAuthState (via the shared /auth/microsoft/callback route).
+// Exchange → owner gate → identity-change wipe → store tokens + identity.
+export async function completeFacadeLogin(
+  env: Env,
+  input: { code: string; codeVerifier: string },
+): Promise<Response> {
+  const redirectUri = facadeCallbackUri(env);
 
-  if (oauthError) {
-    const desc = url.searchParams.get("error_description") ?? "";
-    log.warn("facade_login_callback_error", { error: oauthError, description: desc.slice(0, 200) });
-    return page("授权失败", `<div class="card"><p class="bad">微软授权被取消或失败</p>
-<p><code>${esc(oauthError)}</code>: ${esc(desc.slice(0, 300))}</p>
-<p><a href="/">← 返回状态页</a></p></div>`, 400);
-  }
-  if (!code || !stateToken) {
-    return page("无效回调", `<div class="card"><p class="bad">缺少 code 或 state 参数</p>
-<p><a href="/api/login">重新发起授权</a></p></div>`, 400);
-  }
-
-  const state = await takeAuthState(env, stateToken);
-  if (!state) {
-    return page("状态过期", `<div class="card"><p class="bad">授权状态已过期或不存在（状态有效期 10 分钟）</p>
-<p><a href="/api/login">重新发起授权</a></p></div>`, 400);
-  }
-  if (atob(state.oauth_req_info_b64) !== FACADE_LOGIN_SENTINEL) {
-    // A state row created by upstream's MCP /authorize must not be consumed here.
-    return page("状态不匹配", `<div class="card"><p class="bad">该状态属于其他授权流程</p>
-<p><a href="/api/login">重新发起授权</a></p></div>`, 400);
-  }
-
-  const redirectUri = new URL(req.url).origin + LOGIN_CALLBACK_PATH;
   let token;
   try {
-    token = await exchangeCode(env, { code, codeVerifier: state.code_verifier, redirectUri });
+    token = await exchangeCode(env, {
+      code: input.code,
+      codeVerifier: input.codeVerifier,
+      redirectUri,
+    });
   } catch (e) {
     if (e instanceof TokenExchangeError) {
       log.warn("facade_login_exchange_failed", { reason: e.reason });
+      // Surface the non-sensitive AADSTS summary so a failed round is
+      // diagnosable from the page itself (same fields upstream summarizes).
+      let detail = "";
+      try {
+        const parsed = JSON.parse(e.detail) as {
+          error?: string;
+          error_codes?: number[];
+          correlation_id?: string;
+        };
+        detail = [parsed.error, (parsed.error_codes ?? []).join("/"), parsed.correlation_id]
+          .filter(Boolean)
+          .join(" · ");
+      } catch {
+        detail = e.detail.slice(0, 200);
+      }
       return page("令牌交换失败", `<div class="card"><p class="bad"><code>${esc(e.reason)}</code></p>
-<p class="muted">常见原因：redirect URI 未在 Azure 应用注册中添加（<code>${esc(redirectUri)}</code>）、
-client_secret 失效、或授权码已被使用。</p>
+<p><code>${esc(detail)}</code></p>
+<p class="muted">若提示 redirect/redirect_uri 相关错误：确认 Azure 应用注册的
+身份验证页里登记了 <code>${esc(redirectUri)}</code>（Web 平台），并等待 3-5 分钟生效后
+用 InPrivate 窗口重试。</p>
 <p><a href="/api/login">重试</a> · <a href="/">状态页</a></p></div>`, 502);
     }
     throw e;

@@ -33,7 +33,7 @@
 // callers read `.ok`.
 
 import { log } from "../log";
-import { handleLoginCallback, handleLoginStart, handleStatusPage } from "./login";
+import { handleLoginStart, handleStatusPage } from "./login";
 
 // Interface merging: SKILL_API_KEY joins Env without touching src/types.ts.
 declare global {
@@ -209,10 +209,11 @@ export default {
     const url = new URL(req.url);
 
     // Status page + standalone re-auth (unauthenticated by design; the
-    // OWNER_EMAIL gate inside the login flow is the protection).
+    // OWNER_EMAIL gate inside the login flow is the protection). The login
+    // callback reuses upstream's /auth/microsoft/callback (one registered URI
+    // for both flows) — auth/handler.ts branches on the sentinel state row.
     if (url.pathname === "/") return handleStatusPage(req, env);
     if (url.pathname === "/api/login") return handleLoginStart(req, env);
-    if (url.pathname === "/api/login/callback") return handleLoginCallback(req, env);
 
     const isTools = url.pathname === "/api/tools";
     const toolPrefix = "/api/tool/";

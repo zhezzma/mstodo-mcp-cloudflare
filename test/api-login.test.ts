@@ -1,6 +1,7 @@
-import { env as rawEnv, runInDurableObject } from "cloudflare:test";
+import { env as rawEnv } from "cloudflare:test";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import facadeHandler from "../src/api/handler";
+import AuthHandler from "../src/auth/handler";
 import { STATE_KEY_PREFIX } from "../src/auth/microsoft";
 
 // The test pool types env as Cloudflare.Env; cast once (see upload-handler.test.ts).
@@ -11,6 +12,10 @@ function req(path: string, init: RequestInit = {}): Request {
 }
 
 const TOKENS_KEY = "tokens:owner";
+// vitest pool binding (see vitest.config.ts) — facadeCallbackUri() is pinned
+// to SERVICE_BASE_URL so this is the redirect URI in test flows.
+const SERVICE_ORIGIN = "https://mstodo-mcp.example.workers.dev";
+
 const realFetch = globalThis.fetch;
 
 afterEach(() => {
@@ -66,36 +71,53 @@ describe("status page", () => {
     const keyed = (
       await facadeHandler.fetch(req("/", { headers: { authorization: "Bearer k" } }), keyedEnv)
     )!;
-    expect((await keyed.text())).toContain("owner@example.com");
+    expect(await keyed.text()).toContain("owner@example.com");
   });
 });
 
 // --- standalone login flow -----------------------------------------------------
 
 describe("standalone login", () => {
-  it("GET /api/login redirects to Entra and stores a one-shot state row", async () => {
+  it("GET /api/login redirects to Entra with the SHARED upstream callback URI", async () => {
     const res = (await facadeHandler.fetch(req("/api/login"), env))!;
     expect(res.status).toBe(302);
     const loc = res.headers.get("location")!;
     expect(loc).toContain("https://login.microsoftonline.com/");
     expect(loc).toContain("client_id=test-client");
     expect(loc).toContain("code_challenge_method=S256");
-    const state = new URL(loc).searchParams.get("state")!;
-    const row = await env.OAUTH_KV.get(`${STATE_KEY_PREFIX}${state}`, "json");
+    const params = new URL(loc).searchParams;
+    expect(params.get("redirect_uri")).toBe(`${SERVICE_ORIGIN}/auth/microsoft/callback`);
+    // state row stored for the shared callback to branch on
+    const state = params.get("state")!;
+    const row = (await env.OAUTH_KV.get(`${STATE_KEY_PREFIX}${state}`, "json")) as Record<
+      string,
+      unknown
+    >;
     expect(row).not.toBeNull();
+    expect(atob(String(row!.oauth_req_info_b64))).toBe("facade-login");
   });
 
-  it("callback rejects provider errors and unknown/expired state", async () => {
-    const err = (await facadeHandler.fetch(req("/api/login/callback?error=access_denied"), env))!;
-    expect(err.status).toBe(400);
-
-    const bad = (
-      await facadeHandler.fetch(req("/api/login/callback?code=c&state=nope"), env)
-    )!;
-    expect(bad.status).toBe(400);
+  it("the old dedicated callback route is gone (falls through to OAuth layer)", async () => {
+    expect(await facadeHandler.fetch(req("/api/login/callback"), env)).toBeNull();
   });
 
-  it("full happy path: login → consent → callback stores tokens + identity", async () => {
+  it("shared callback: provider error → 400", async () => {
+    const res = await AuthHandler.fetch(
+      req("/auth/microsoft/callback?error=access_denied&error_description=nope"),
+      env,
+    );
+    expect(res.status).toBe(400);
+  });
+
+  it("shared callback: unknown/expired state → 400", async () => {
+    const res = await AuthHandler.fetch(
+      req("/auth/microsoft/callback?code=c&state=nope"),
+      env,
+    );
+    expect(res.status).toBe(400);
+  });
+
+  it("full happy path: /api/login → consent → SHARED callback stores tokens + identity", async () => {
     await env.TODO_CACHE.delete(TOKENS_KEY);
     // 1. start login, capture state
     const start = (await facadeHandler.fetch(req("/api/login"), env))!;
@@ -130,10 +152,11 @@ describe("standalone login", () => {
       throw new Error(`unexpected fetch: ${url}`);
     }) as unknown as typeof fetch;
 
-    // 3. callback
-    const cb = (
-      await facadeHandler.fetch(req(`/api/login/callback?code=authcode&state=${state}`), env)
-    )!;
+    // 3. complete via the SHARED upstream callback (sentinel row branches to facade)
+    const cb = await AuthHandler.fetch(
+      req(`/auth/microsoft/callback?code=authcode&state=${state}`),
+      env,
+    );
     expect(cb.status).toBe(200);
     expect(await cb.text()).toContain("授权完成");
 
@@ -141,27 +164,37 @@ describe("standalone login", () => {
     const tokens = (await env.TODO_CACHE.get(TOKENS_KEY, "json")) as Record<string, unknown>;
     expect(tokens.access_token).toBe("NEW_AT");
     expect(tokens.refresh_token).toBe("NEW_RT");
-    const identity = (await env.TODO_CACHE.get("identity:owner", "json")) as Record<string, unknown>;
+    const identity = (await env.TODO_CACHE.get("identity:owner", "json")) as Record<
+      string,
+      unknown
+    >;
     expect(identity.mail).toBe("test-owner@example.com");
 
     // 5. state row was consumed (single-use)
     expect(await env.OAUTH_KV.get(`${STATE_KEY_PREFIX}${state}`)).toBeNull();
   });
 
-  it("callback refuses state rows minted by the upstream MCP authorize flow", async () => {
-    // A row with real MCP oauth_req_info (not our sentinel) must be rejected.
-    await env.OAUTH_KV.put(
-      `${STATE_KEY_PREFIX}mcpstate`,
-      JSON.stringify({
-        oauth_req_info_b64: btoa(JSON.stringify({ clientId: "claude" })),
-        code_verifier: "v",
-        created_at: Date.now(),
-      }),
+  it("exchange failure surfaces the AADSTS summary on the error page", async () => {
+    const start = (await facadeHandler.fetch(req("/api/login"), env))!;
+    const state = new URL(start.headers.get("location")!).searchParams.get("state")!;
+    globalThis.fetch = vi.fn(async () =>
+      new Response(
+        JSON.stringify({
+          error: "invalid_grant",
+          error_description: "AADSTS50196: loop detected.",
+          error_codes: [50196],
+          correlation_id: "abc-123",
+        }),
+        { status: 400 },
+      ),
+    ) as unknown as typeof fetch;
+    const cb = await AuthHandler.fetch(
+      req(`/auth/microsoft/callback?code=authcode&state=${state}`),
+      env,
     );
-    const res = (
-      await facadeHandler.fetch(req("/api/login/callback?code=c&state=mcpstate"), env)
-    )!;
-    expect(res.status).toBe(400);
-    expect(await res.text()).toContain("状态不匹配");
+    expect(cb.status).toBe(502);
+    const body = await cb.text();
+    expect(body).toContain("invalid_grant");
+    expect(body).toContain("50196");
   });
 });

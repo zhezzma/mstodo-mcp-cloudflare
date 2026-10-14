@@ -60,9 +60,10 @@ facade routes live before `oauthProvider.fetch` in `src/index.ts`.
 - `GET /api/login` — 302 to Microsoft consent (PKCE, single-use state).
   Unauthenticated by design; the `OWNER_EMAIL` gate rejects non-owners before
   any state is stored.
-- `GET /api/login/callback` — exchange, owner gate, store tokens + identity.
-  **Requires a one-time redirect URI in the Azure app registration:**
-  `<origin>/api/login/callback` (Platform: Web).
+- Callback reuses the **same** redirect URI as the upstream MCP flow
+  (`/auth/microsoft/callback`) — `src/auth/handler.ts` branches on a sentinel
+  state row and delegates to `completeFacadeLogin`. Only ONE Azure redirect
+  URI is needed for both flows (avoids known MSA multi-URI quirks).
 
 Recovery path when the refresh token dies (password change, revoked consent):
 open `/` → click re-auth → done. Identity changes wipe all per-identity cached
