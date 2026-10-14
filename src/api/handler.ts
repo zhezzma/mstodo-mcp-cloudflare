@@ -36,9 +36,12 @@ import { log } from "../log";
 import { handleLoginStart, handleStatusPage } from "./login";
 
 // Interface merging: SKILL_API_KEY joins Env without touching src/types.ts.
+// Declared required: `wrangler types` emits dashboard secrets as required
+// fields, and an optional merge (string | undefined) collides with it.
+// Runtime fail-closed below still guards an unconfigured deployment.
 declare global {
   interface Env {
-    SKILL_API_KEY?: string;
+    SKILL_API_KEY: string;
   }
 }
 
@@ -193,7 +196,28 @@ export function unwrapToolResult(
         return { body: parsed, isError: r.isError === true };
       }
     } catch {
-      // not JSON — fall through to raw blocks
+      // not JSON — fall through to structured handling below
+    }
+    // MCP SDK argument-validation failures come back as isError results whose
+    // text is "MCP error -32602: ... [zod issues]". Surface the zod detail
+    // array directly so callers can branch on `reason` instead of parsing
+    // prose out of content[0].text.
+    if (r.isError && first.text.includes("-32602")) {
+      const start = first.text.indexOf("[");
+      const end = first.text.lastIndexOf("]");
+      if (start !== -1 && end > start) {
+        try {
+          const detail: unknown = JSON.parse(first.text.slice(start, end + 1));
+          if (Array.isArray(detail)) {
+            return {
+              body: { ok: false, reason: "invalid_arguments", tool, detail },
+              isError: true,
+            };
+          }
+        } catch {
+          // not a zod array — fall through to raw blocks
+        }
+      }
     }
   }
   return {

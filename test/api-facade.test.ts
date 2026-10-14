@@ -213,4 +213,38 @@ describe("unwrapToolResult", () => {
     const res = unwrapToolResult("t", { content: [{ type: "text", text: "plain string" }] });
     expect(res.body).toEqual({ ok: true, tool: "t", content: [{ type: "text", text: "plain string" }] });
   });
+
+  it("normalizes MCP -32602 argument-validation errors into invalid_arguments", () => {
+    const zod = JSON.stringify([
+      { expected: "string", code: "invalid_type", path: ["list"], message: "Invalid input: expected string, received undefined" },
+    ]);
+    const res = unwrapToolResult("create_task", {
+      isError: true,
+      content: [
+        {
+          type: "text",
+          text: `MCP error -32602: Input validation error: Invalid arguments for tool create_task: ${zod}`,
+        },
+      ],
+    });
+    expect(res.isError).toBe(true);
+    expect(res.body).toEqual({
+      ok: false,
+      reason: "invalid_arguments",
+      tool: "create_task",
+      detail: JSON.parse(zod),
+    });
+  });
+
+  it("keeps raw blocks when the -32602 text carries no zod array", () => {
+    const res = unwrapToolResult("t", {
+      isError: true,
+      content: [{ type: "text", text: "MCP error -32602: no array here" }],
+    });
+    expect(res.body).toEqual({
+      ok: false,
+      tool: "t",
+      content: [{ type: "text", text: "MCP error -32602: no array here" }],
+    });
+  });
 });

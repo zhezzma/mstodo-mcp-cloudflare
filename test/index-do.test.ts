@@ -106,6 +106,21 @@ describe("TodoIndex CRUD + FTS", () => {
     expect(rows[0].title).toBe("Renamed");
   });
 
+  it("search: checklist-tier parse failure degrades to title/body tier (column filters)", async () => {
+    const stub = indexStub("search-tier1-degrade");
+    await stub.upsertTask(taskFixture, "list-A");
+
+    // A tasks_fts column filter (title:foo) parses fine on tier 0 but fails on
+    // the single-column checklist_fts ("no such column: title:") — the
+    // checklist tier must degrade to title/body matches instead of erroring.
+    const withFilter = await stub.search({ query: "title:invoice", include_checklist: true });
+    expect(withFilter.rows).toHaveLength(1);
+    expect(withFilter.rows[0].task_id).toBe("task-1");
+
+    // Bare terms still work with the checklist tier active.
+    expect((await stub.search({ query: "invoice" })).rows).toHaveLength(1);
+  });
+
   it("deleteTask removes the row and its FTS entry", async () => {
     const stub = indexStub("crud-3");
     await stub.upsertTask(taskFixture, "list-A");

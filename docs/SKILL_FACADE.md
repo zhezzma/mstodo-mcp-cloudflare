@@ -26,8 +26,12 @@ curl -sS -X POST -H "Authorization: Bearer $KEY" -H "Content-Type: application/j
   -d '{}' "$BASE/api/tool/whoami"
 
 curl -sS -X POST -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" \
-  -d '{"list_id":"<LIST_ID>","$top":50}' "$BASE/api/tool/list_tasks"
+  -d '{"list":"任务","top":50}' "$BASE/api/tool/list_tasks"
 ```
+
+List args: most tools take `list` (display name / configured alias / Graph list
+ID — resolved server-side). NEVER guess `list_id` or `$top`-style names: pull
+the exact `inputSchema` from `/api/tools` first.
 
 ## Response contract
 
@@ -36,6 +40,9 @@ The tool's own JSON passes through verbatim as the HTTP body:
 - success: `{ "ok": true, ... }` (HTTP 200)
 - tool-level failure: `{ "ok": false, "reason": "...", ... }` (still HTTP 200 —
   read `.ok`/`.reason`, don't branch on status)
+- argument-validation failure: `{ "ok": false, "reason": "invalid_arguments",
+  "tool": "...", "detail": [zod issues] }` — read `detail[].path`/`message` to
+  fix the argument names (do not retry blindly)
 - facade-level failures are non-200: `401` bad key, `404` unknown tool, `405`
   wrong method, `400` bad JSON body, `413` body too large, `502` MCP transport
   failure (`detail` carries the JSON-RPC error).
@@ -84,8 +91,11 @@ When the secret is unset every request is rejected (fail closed).
 - `src/api/handler.ts` also declares `SKILL_API_KEY?` on `Env` via interface
   merging so `src/types.ts` stays untouched
 - `src/index.ts` — 3 lines: import + dispatch `/api/*` before `oauthProvider.fetch`
-- `test/api-facade.test.ts` — new; 14 tests (auth, routing, handshake order,
-  pass-through semantics)
+- `test/api-facade.test.ts` — new; 16 tests (auth, routing, handshake order,
+  pass-through semantics, invalid_arguments normalization)
+- `src/cache/index-do.ts` — one fix: the checklist FTS tier degrades to
+  title/body matches when its query fails to parse (tasks_fts column filters
+  like `title:foo` used to error the whole search)
 
 Future upstream merges should only ever conflict on the three `src/index.ts`
 lines; keep the `facadeHandler.fetch` dispatch before `oauthProvider.fetch`

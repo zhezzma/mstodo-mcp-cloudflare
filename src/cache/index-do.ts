@@ -1209,17 +1209,27 @@ export class TodoIndex extends DurableObject<Env> implements TokenProvider {
 
     // Tier 1 — tasks matching via checklist text, appended (deduped by task_id;
     // one matched item may repeat a task, and a task may already be in tier 0).
-    const clRows = this.sql
-      .exec(
-        `SELECT t.* FROM checklist_fts cf
-           JOIN checklist_items ci ON ci.rowid = cf.rowid
-           JOIN tasks t ON t.task_id = ci.task_id
-          WHERE checklist_fts MATCH ?${tWhere} ORDER BY rank LIMIT ?`,
-        opts.query,
-        ...tParams,
-        limit,
-      )
-      .toArray() as unknown as TaskRow[];
+    // checklist_fts exposes a single column (display_name); a query carrying a
+    // tasks_fts column filter (title:foo / body_plain:foo) fails to PARSE here
+    // ("no such column: title:") and would otherwise take the whole search
+    // down. The checklist tier is a recall enhancement — degrade to the
+    // title/body tier instead of erroring.
+    let clRows: TaskRow[] = [];
+    try {
+      clRows = this.sql
+        .exec(
+          `SELECT t.* FROM checklist_fts cf
+             JOIN checklist_items ci ON ci.rowid = cf.rowid
+             JOIN tasks t ON t.task_id = ci.task_id
+            WHERE checklist_fts MATCH ?${tWhere} ORDER BY rank LIMIT ?`,
+          opts.query,
+          ...tParams,
+          limit,
+        )
+        .toArray() as unknown as TaskRow[];
+    } catch (e) {
+      log.warn("index_checklist_search_failed", { error: String(e) });
+    }
 
     const seen = new Set(titleRows.map((r) => r.task_id));
     const merged = [...titleRows];
