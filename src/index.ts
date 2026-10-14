@@ -6,6 +6,7 @@ import AuthHandler from "./auth/handler";
 import { handleUpload } from "./upload/handler";
 import { handleDownload } from "./upload/download-handler";
 import { handleWebhook } from "./subscriptions/webhook-handler";
+import facadeHandler from "./api/handler";
 import { VERSION } from "./version";
 
 export { MSToDoMCP, TodoIndex };
@@ -37,6 +38,13 @@ export default {
     // OAuth/MCP routing below is unaffected. Lives before oauthProvider.fetch so
     // /upload is reachable without an OAuth access token (it authenticates with a
     // single-use signed link minted by create_upload_link).
+    // Skill-facade REST endpoints (GET /api/tools, POST /api/tool/:name). Same
+    // null-for-other-paths contract as the public handlers below; authenticated
+    // with the SKILL_API_KEY secret instead of OAuth. Lives before
+    // oauthProvider.fetch so /api/* never reaches the OAuth layer.
+    const apiRes = await facadeHandler.fetch(req, env);
+    if (apiRes) return apiRes;
+
     const uploadRes = await handleUpload(req, env);
     if (uploadRes) return uploadRes;
 
