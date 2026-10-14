@@ -56,7 +56,11 @@ export type McpRpc = (
 
 const MCP_PROTOCOL_VERSION = "2025-06-18";
 const CLIENT_INFO = { name: "mstodo-skill-facade", version: "1.0.0" } as const;
-const DO_SESSION_PREFIX = "skill-facade:";
+const DO_SESSION_PREFIX = "rpc:skill-facade:";
+// NOTE: the `rpc:` prefix is load-bearing — McpAgent.getTransportType() parses
+// the DO name as `<transport>:<id>` and only accepts sse / streamable-http /
+// rpc. The rpc: prefix is the SDK's own mode for driving the agent purely via
+// the handleMcpMessage RPC (no websocket/SSE addressing needed).
 // Tool arguments can carry base64 file attachments (Graph caps a file at
 // 25 MiB ≈ 34 MB base64); cap generously below the Workers request limit.
 const MAX_BODY_BYTES = 64 * 1024 * 1024;
